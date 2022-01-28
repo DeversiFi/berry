@@ -28,7 +28,11 @@ export async function makeArchiveFromDirectory(source: PortablePath, {baseFs = n
   }
 
   const target = ppath.resolve(PortablePath.root, prefixPath!);
-  await zipFs.copyPromise(target, source, {baseFs, stableTime: true, stableSort: true});
+  // maskAnd is used remove all write permissions when unzipping. This way the checksum of the
+  // archive will be independent of those permissions which makes it possible to
+  // use file: protocol with directory which might be moved to a read only
+  // location (like /nix/store).
+  await zipFs.copyPromise(target, source, {baseFs, stableTime: true, stableSort: true, maskAnd: ~0o222});
 
   return zipFs;
 }

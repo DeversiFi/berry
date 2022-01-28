@@ -442,7 +442,8 @@ export class PnpInstaller implements Installer {
     this.opts.project.storedBuildState.delete(locator.locatorHash);
 
     await xfs.mkdirPromise(unplugPath, {recursive: true});
-    await xfs.copyPromise(unplugPath, PortablePath.dot, {baseFs: fetchResult.packageFs, overwrite: false});
+    // maskOr is used to ensure owners read/write permissions when unplugging.
+    await xfs.copyPromise(unplugPath, PortablePath.dot, {baseFs: fetchResult.packageFs, overwrite: false, maskOr: 0o600 });
 
     await xfs.writeFilePromise(readyFile, ``);
 

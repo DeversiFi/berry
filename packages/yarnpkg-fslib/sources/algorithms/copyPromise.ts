@@ -16,6 +16,8 @@ export type CopyOptions = {
   stableTime: boolean,
   stableSort: boolean,
   overwrite: boolean,
+  maskAnd?: number,
+  maskOr?: number
 };
 
 export type Operations =
@@ -62,7 +64,10 @@ async function copyImpl<P1 extends Path, P2 extends Path>(prelayout: Operations,
   let updated: boolean;
   switch (true) {
     case sourceStat.isDirectory(): {
-      updated = await copyFolder(prelayout, postlayout, updateTime, destinationFs, destination, destinationStat, sourceFs, source, sourceStat, opts);
+      // Folder needs to be writeable, so that files can be written to it during
+      // layout phase. The original mode will be restored post layout.
+      const sourceStatWriteable = { ...sourceStat, mode: sourceStat.mode | 0o200 }
+      updated = await copyFolder(prelayout, postlayout, updateTime, destinationFs, destination, destinationStat, sourceFs, source, sourceStatWriteable, opts);
     } break;
 
     case sourceStat.isFile(): {
@@ -83,8 +88,16 @@ async function copyImpl<P1 extends Path, P2 extends Path>(prelayout: Operations,
     updated = true;
   }
 
-  if (destinationStat === null || (destinationStat.mode & 0o777) !== (sourceStat.mode & 0o777)) {
-    postlayout.push(() => destinationFs.chmodPromise(destination, sourceStat.mode & 0o777));
+  const maskedMode = opts.maskAnd != null
+    ? sourceStat.mode & opts.maskAnd
+    : sourceStat.mode & 0o777
+
+  const desiredMode = opts.maskOr != null
+    ? maskedMode | opts.maskOr
+    : maskedMode
+
+  if (destinationStat === null || (destinationStat.mode & 0o777) !== desiredMode) {
+    postlayout.push(() => destinationFs.chmodPromise(destination, desiredMode));
     updated = true;
   }
 
