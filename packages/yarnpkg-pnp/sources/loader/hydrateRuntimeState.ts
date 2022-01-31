@@ -45,10 +45,13 @@ export function hydrateRuntimeState(data: SerializedState, {basePath}: HydrateRu
         // we only need this for packages that are used by the currently running script
         // this is a lazy getter because `ppath.join` has some overhead
         get packageLocation() {
-          // We use ppath.join instead of ppath.resolve because:
-          // 1) packageInformationData.packageLocation is a relative path when part of the SerializedState
-          // 2) ppath.join preserves trailing slashes
-          return resolvedPackageLocation || (resolvedPackageLocation = ppath.join(absolutePortablePath, packageInformationData.packageLocation));
+          // We keep /nix/store paths as they are
+          return resolvedPackageLocation || (packageInformationData.packageLocation.match('^/nix/store/')
+            ? (resolvedPackageLocation = packageInformationData.packageLocation)
+            // We use ppath.join instead of ppath.resolve because:
+            // 1) packageInformationData.packageLocation is a relative path when part of the SerializedState
+            // 2) ppath.join preserves trailing slashes
+            : (resolvedPackageLocation = ppath.join(absolutePortablePath, packageInformationData.packageLocation)));
         },
       }];
     }))];
