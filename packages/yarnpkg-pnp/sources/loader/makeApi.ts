@@ -491,10 +491,18 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     if (isPathIgnored(location) && !resolveIgnored)
       return null;
 
-    let relativeLocation = ppath.relative(runtimeState.basePath, location);
+    let relativeLocation
 
-    if (!relativeLocation.match(isStrictRegExp))
-      relativeLocation = `./${relativeLocation}` as PortablePath;
+
+    let boundryValue = ``
+    if (location.match('^/nix/store/')) {
+      relativeLocation = location
+      boundryValue = `/`
+    } else {
+      relativeLocation = ppath.relative(runtimeState.basePath, location);
+      if (!relativeLocation.match(isStrictRegExp))
+        relativeLocation = `./${relativeLocation}` as PortablePath;
+    }
 
     if (!relativeLocation.endsWith(`/`))
       relativeLocation = `${relativeLocation}/` as PortablePath;
@@ -508,7 +516,7 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
       }
 
       return entry.locator;
-    } while (relativeLocation !== ``);
+    } while (relativeLocation !== boundryValue);
 
     return null;
   }
