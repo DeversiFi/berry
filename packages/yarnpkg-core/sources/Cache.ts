@@ -354,7 +354,10 @@ export class Cache {
     const [shouldMock, cachePath, checksum] = await loadPackageThroughMutex();
 
     this.markedFiles.add(cachePath);
-    const realCachePath = await xfs.realpathPromise(cachePath);
+
+    const realCachePath = shouldMock
+      ? cachePath
+      : await xfs.realpathPromise(cachePath);
 
     let zipFs: ZipFS | undefined;
 
