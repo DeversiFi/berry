@@ -354,6 +354,7 @@ export class Cache {
     const [shouldMock, cachePath, checksum] = await loadPackageThroughMutex();
 
     this.markedFiles.add(cachePath);
+    const realCachePath = await xfs.realpathPromise(cachePath);
 
     let zipFs: ZipFS | undefined;
 
@@ -361,7 +362,7 @@ export class Cache {
 
     const zipFsBuilder = shouldMock
       ? () => makeMockPackage()
-      : () => new ZipFS(cachePath, {baseFs, libzip, readOnly: true});
+      : () => new ZipFS(realCachePath, {baseFs, libzip, readOnly: true});
 
     const lazyFs = new LazyFS<PortablePath>(() => miscUtils.prettifySyncErrors(() => {
       return zipFs = zipFsBuilder();
@@ -370,8 +371,8 @@ export class Cache {
     }), ppath);
 
     // We use an AliasFS to speed up getRealPath calls (e.g. VirtualFetcher.ensureVirtualLink)
-    // (there's no need to create the lazy baseFs instance to gather the already-known cachePath)
-    const aliasFs = new AliasFS(cachePath, {baseFs: lazyFs, pathUtils: ppath});
+    // (there's no need to create the lazy baseFs instance to gather the already-known realCachePath)
+    const aliasFs = new AliasFS(realCachePath, {baseFs: lazyFs, pathUtils: ppath});
 
     const releaseFs = () => {
       zipFs?.discardAndClose();
