@@ -493,13 +493,21 @@ export class PnpInstaller implements Installer {
 }
 
 function normalizeDirectoryPath(root: PortablePath, folder: PortablePath) {
-  let relativeFolder = ppath.relative(root, folder);
+  let normalizedPath
 
-  if (!relativeFolder.match(/^\.{0,2}\//))
-    // Don't use ppath.join here, it ignores the `.`
-    relativeFolder = `./${relativeFolder}` as PortablePath;
+  // Keep /nix/store path as absolute.
+  if (folder.match('^/nix/store/')) {
+    normalizedPath = folder
+  // and other paths as absolute.
+  } else {
+    normalizedPath = ppath.relative(root, folder);
+    if (!normalizedPath.match(/^\.{0,2}\//))
+      // Don't use ppath.join here, it ignores the `.`
+      normalizedPath = `./${normalizedPath}` as PortablePath;
+  }
 
-  return relativeFolder.replace(/\/?$/, `/`)  as PortablePath;
+  // Ensure trailing /
+  return normalizedPath.replace(/\/?$/, `/`) as PortablePath;
 }
 
 type UnboxPromise<T extends Promise<any>> = T extends Promise<infer U> ? U: never;
