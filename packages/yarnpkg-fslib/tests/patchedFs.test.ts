@@ -63,6 +63,24 @@ describe(`patchedFs`, () => {
     expect(Buffer.isBuffer(result.buffer)).toBeTruthy();
   });
 
+  it(`matches the util.promisify return shape of node: fs.write`, async () => {
+    const patchedFs = extendFs(fs, new PosixFS(new NodeFS()));
+    const patchedFsWriteAsync = promisify(patchedFs.write);
+
+    const tmpdir = npath.fromPortablePath(xfs.mktempSync());
+
+    const file = npath.join(tmpdir, `file.txt`);
+
+    const fd = fs.openSync(file, `w`);
+
+    const bufferFs = Buffer.alloc(16);
+
+    const result = await patchedFsWriteAsync(fd, bufferFs, 0, 16, 0);
+
+    expect(typeof result.bytesWritten).toBe(`number`);
+    expect(Buffer.isBuffer(result.buffer)).toBeTruthy();
+  });
+
   it(`should support URL instances`, () => {
     const patchedFs = extendFs(fs, new PosixFS(new NodeFS()));
 
@@ -198,5 +216,45 @@ describe(`patchedFs`, () => {
     });
 
     expect(patchedFs.readFileSync(`${nativeTmpdir}/archive.zip/a.txt`, `utf8`)).toStrictEqual(`foo`);
+  });
+
+  it(`should support readSync using options`, () => {
+    const patchedFs = extendFs(fs, new PosixFS(new NodeFS()));
+
+    const fd = patchedFs.openSync(__filename, `r`);
+
+    const buffer = Buffer.alloc(128);
+    try {
+      // @ts-expect-error - Node types are out of date
+      const bytesRead = patchedFs.readSync(fd, buffer);
+
+      expect(bytesRead).toEqual(buffer.byteLength);
+    } finally {
+      patchedFs.closeSync(fd);
+    }
+  });
+
+  it(`should support read using options`, async() => {
+    const patchedFs = extendFs(fs, new PosixFS(new NodeFS()));
+
+    const fd = patchedFs.openSync(__filename, `r`);
+
+    const buffer = Buffer.alloc(42);
+    try {
+      const bytesRead = await new Promise<number>((resolve, reject) => {
+        // @ts-expect-error - Node types are out of date
+        patchedFs.read(fd, {buffer}, (err, bytesRead, buffer) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(bytesRead);
+          }
+        });
+      });
+
+      expect(bytesRead).toEqual(buffer.byteLength);
+    } finally {
+      patchedFs.closeSync(fd);
+    }
   });
 });

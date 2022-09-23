@@ -31,6 +31,7 @@ import {isFolderInside}                                                 from './
 import * as formatUtils                                                 from './formatUtils';
 import * as hashUtils                                                   from './hashUtils';
 import * as miscUtils                                                   from './miscUtils';
+import * as nodeUtils                                                   from './nodeUtils';
 import * as scriptUtils                                                 from './scriptUtils';
 import * as semverUtils                                                 from './semverUtils';
 import * as structUtils                                                 from './structUtils';
@@ -41,7 +42,7 @@ import {IdentHash, DescriptorHash, LocatorHash, PackageExtensionStatus} from './
 // When upgraded, the lockfile entries have to be resolved again (but the specific
 // versions are still pinned, no worry). Bump it when you change the fields within
 // the Package type; no more no less.
-const LOCKFILE_VERSION = 5;
+const LOCKFILE_VERSION = 6;
 
 // Same thing but must be bumped when the members of the Project class changes (we
 // don't recommend our users to check-in this file, so it's fine to bump it even
@@ -75,27 +76,27 @@ export type InstallOptions = {
    * fetched. Some fetches may occur even during the resolution, for example
    * when resolving git packages.
    */
-  cache: Cache,
+  cache: Cache;
 
   /**
    * An optional override for the default fetching pipeline. This is for
    * overrides only - if you need to _add_ resolvers, prefer adding them
    * through regular plugins instead.
    */
-  fetcher?: Fetcher,
+  fetcher?: Fetcher;
 
   /**
    * An optional override for the default resolution pipeline. This is for
    * overrides only - if you need to _add_ resolvers, prefer adding them
    * through regular plugins instead.
    */
-  resolver?: Resolver
+  resolver?: Resolver;
 
   /**
    * Provide a report instance that'll be use to store the information emitted
    * during the install process.
    */
-  report: Report,
+  report: Report;
 
   /**
    * If true, Yarn will check that the lockfile won't change after the
@@ -103,31 +104,31 @@ export type InstallOptions = {
    * the list of files in `immutablePatterns` and check that they didn't get
    * modified either.
    */
-  immutable?: boolean,
+  immutable?: boolean;
 
   /**
    * If true, Yarn will exclusively use the lockfile metadata. Setting this
    * flag will cause it to ignore any change in the manifests, and to abort
    * if any dependency isn't present in the lockfile.
    */
-  lockfileOnly?: boolean,
+  lockfileOnly?: boolean;
 
   /**
    * Changes which artifacts are generated during the install. Check the
    * enumeration documentation for details.
    */
-  mode?: InstallMode,
+  mode?: InstallMode;
 
   /**
    * If true (the default), Yarn will update the workspace manifests once the
    * install has completed.
    */
-  persistProject?: boolean,
+  persistProject?: boolean;
 
   /**
    * @deprecated Use `mode=skip-build`
    */
-  skipBuild?: never,
+  skipBuild?: never;
 };
 
 const INSTALL_STATE_FIELDS = {
@@ -159,10 +160,10 @@ type RestoreInstallStateOpts = {
 type InstallState = Pick<Project, typeof INSTALL_STATE_FIELDS[keyof typeof INSTALL_STATE_FIELDS][number]>;
 
 export type PeerRequirement = {
-  subject: LocatorHash,
-  requested: Ident,
-  rootRequester: LocatorHash,
-  allRequesters: Array<LocatorHash>,
+  subject: LocatorHash;
+  requested: Ident;
+  rootRequester: LocatorHash;
+  allRequesters: Array<LocatorHash>;
 };
 
 const makeLockfileChecksum = (normalizedContent: string) =>
@@ -269,7 +270,18 @@ export class Project {
     if (locator)
       return {project, locator, workspace: null};
 
-    throw new UsageError(`The nearest package directory (${formatUtils.pretty(configuration, packageCwd, formatUtils.Type.PATH)}) doesn't seem to be part of the project declared in ${formatUtils.pretty(configuration, project.cwd, formatUtils.Type.PATH)}.\n\n- If the project directory is right, it might be that you forgot to list ${formatUtils.pretty(configuration, ppath.relative(project.cwd, packageCwd), formatUtils.Type.PATH)} as a workspace.\n- If it isn't, it's likely because you have a yarn.lock or package.json file there, confusing the project root detection.`);
+    const projectCwdLog = formatUtils.pretty(configuration, project.cwd, formatUtils.Type.PATH);
+    const packageCwdLog = formatUtils.pretty(configuration, ppath.relative(project.cwd, packageCwd), formatUtils.Type.PATH);
+
+    const unintendedProjectLog = `- If ${projectCwdLog} isn't intended to be a project, remove any yarn.lock and/or package.json file there.`;
+    const missingWorkspaceLog = `- If ${projectCwdLog} is intended to be a project, it might be that you forgot to list ${packageCwdLog} in its workspace configuration.`;
+    const decorrelatedProjectLog = `- Finally, if ${projectCwdLog} is fine and you intend ${packageCwdLog} to be treated as a completely separate project (not even a workspace), create an empty yarn.lock file in it.`;
+
+    throw new UsageError(`The nearest package directory (${formatUtils.pretty(configuration, packageCwd, formatUtils.Type.PATH)}) doesn't seem to be part of the project declared in ${formatUtils.pretty(configuration, project.cwd, formatUtils.Type.PATH)}.\n\n${[
+      unintendedProjectLog,
+      missingWorkspaceLog,
+      decorrelatedProjectLog,
+    ].join(`\n`)}`);
   }
 
   constructor(projectCwd: PortablePath, {configuration}: {configuration: Configuration}) {
@@ -666,7 +678,7 @@ export class Project {
 
     const realResolver = opts.resolver || this.configuration.makeResolver();
 
-    const legacyMigrationResolver = new LegacyMigrationResolver();
+    const legacyMigrationResolver = new LegacyMigrationResolver(realResolver);
     await legacyMigrationResolver.setup(this, {report: opts.report});
 
     const resolverChain = opts.lockfileOnly
@@ -694,120 +706,141 @@ export class Project {
     const descriptorResolutionPromises = new Map<DescriptorHash, Promise<Package>>();
 
     const dependencyResolutionLocator = this.topLevelWorkspace.anchoredLocator;
-    const allResolutionDependencyPackages = new Set<LocatorHash>();
+    const resolutionDependencies = new Set<LocatorHash>();
 
     const resolutionQueue: Array<Promise<unknown>> = [];
 
-    const startPackageResolution = async (locator: Locator) => {
-      const originalPkg = await miscUtils.prettifyAsyncErrors(async () => {
-        return await resolver.resolve(locator, resolveOptions);
-      }, message => {
-        return `${structUtils.prettyLocator(this.configuration, locator)}: ${message}`;
-      });
+    // Doing these calls early is important: it seems calling it after we've started the resolution incurs very high
+    // performance penalty on WSL, with the Gatsby benchmark jumping from ~28s to ~130s. It's possible this is due to
+    // the number of async tasks being listed in the report, although it's strange this doesn't occur on other systems.
+    const currentArchitecture = nodeUtils.getArchitectureSet();
+    const supportedArchitectures = this.configuration.getSupportedArchitectures();
 
-      if (!structUtils.areLocatorsEqual(locator, originalPkg))
-        throw new Error(`Assertion failed: The locator cannot be changed by the resolver (went from ${structUtils.prettyLocator(this.configuration, locator)} to ${structUtils.prettyLocator(this.configuration, originalPkg)})`);
-
-      originalPackages.set(originalPkg.locatorHash, originalPkg);
-
-      const pkg = this.configuration.normalizePackage(originalPkg);
-
-      for (const [identHash, descriptor] of pkg.dependencies) {
-        const dependency = await this.configuration.reduceHook(hooks => {
-          return hooks.reduceDependency;
-        }, descriptor, this, pkg, descriptor, {
-          resolver,
-          resolveOptions,
+    await opts.report.startProgressPromise(Report.progressViaTitle(), async progress => {
+      const startPackageResolution = async (locator: Locator) => {
+        const originalPkg = await miscUtils.prettifyAsyncErrors(async () => {
+          return await resolver.resolve(locator, resolveOptions);
+        }, message => {
+          return `${structUtils.prettyLocator(this.configuration, locator)}: ${message}`;
         });
 
-        if (!structUtils.areIdentsEqual(descriptor, dependency))
-          throw new Error(`Assertion failed: The descriptor ident cannot be changed through aliases`);
+        if (!structUtils.areLocatorsEqual(locator, originalPkg))
+          throw new Error(`Assertion failed: The locator cannot be changed by the resolver (went from ${structUtils.prettyLocator(this.configuration, locator)} to ${structUtils.prettyLocator(this.configuration, originalPkg)})`);
 
-        const bound = resolver.bindDescriptor(dependency, locator, resolveOptions);
-        pkg.dependencies.set(identHash, bound);
+        originalPackages.set(originalPkg.locatorHash, originalPkg);
+
+        const pkg = this.configuration.normalizePackage(originalPkg);
+
+        for (const [identHash, descriptor] of pkg.dependencies) {
+          const dependency = await this.configuration.reduceHook(hooks => {
+            return hooks.reduceDependency;
+          }, descriptor, this, pkg, descriptor, {
+            resolver,
+            resolveOptions,
+          });
+
+          if (!structUtils.areIdentsEqual(descriptor, dependency))
+            throw new Error(`Assertion failed: The descriptor ident cannot be changed through aliases`);
+
+          const bound = resolver.bindDescriptor(dependency, locator, resolveOptions);
+          pkg.dependencies.set(identHash, bound);
+        }
+
+        const dependencyResolutions = miscUtils.allSettledSafe([...pkg.dependencies.values()].map(descriptor => {
+          return scheduleDescriptorResolution(descriptor);
+        }));
+
+        resolutionQueue.push(dependencyResolutions);
+
+        // While the promise is now part of `resolutionQueue`, nothing is
+        // technically `awaiting` it just yet (and nothing will until the
+        // current resolution pass fully ends, and the next one starts).
+        //
+        // To avoid V8 printing an UnhandledPromiseRejectionWarning, we
+        // bind a empty `catch`.
+        //
+        dependencyResolutions.catch(() => {});
+
+        allPackages.set(pkg.locatorHash, pkg);
+
+        return pkg;
+      };
+
+      const schedulePackageResolution = async (locator: Locator) => {
+        const promise = packageResolutionPromises.get(locator.locatorHash);
+        if (typeof promise !== `undefined`)
+          return promise;
+
+        const newPromise = Promise.resolve().then(() => startPackageResolution(locator));
+        packageResolutionPromises.set(locator.locatorHash, newPromise);
+        return newPromise;
+      };
+
+      const startDescriptorAliasing = async (descriptor: Descriptor, alias: Descriptor): Promise<Package> => {
+        const resolution = await scheduleDescriptorResolution(alias);
+
+        allDescriptors.set(descriptor.descriptorHash, descriptor);
+        allResolutions.set(descriptor.descriptorHash, resolution.locatorHash);
+
+        return resolution;
+      };
+
+      const startDescriptorResolution = async (descriptor: Descriptor): Promise<Package> => {
+        progress.setTitle(structUtils.prettyDescriptor(this.configuration, descriptor));
+
+        const alias = this.resolutionAliases.get(descriptor.descriptorHash);
+        if (typeof alias !== `undefined`)
+          return startDescriptorAliasing(descriptor, this.storedDescriptors.get(alias)!);
+
+        const resolutionDependenciesList = resolver.getResolutionDependencies(descriptor, resolveOptions);
+        const resolvedDependencies = new Map(await miscUtils.allSettledSafe(resolutionDependenciesList.map(async dependency => {
+          const bound = resolver.bindDescriptor(dependency, dependencyResolutionLocator, resolveOptions);
+
+          const resolvedPackage = await scheduleDescriptorResolution(bound);
+          resolutionDependencies.add(resolvedPackage.locatorHash);
+
+          return [dependency.descriptorHash, resolvedPackage] as const;
+        })));
+
+        const candidateResolutions = await miscUtils.prettifyAsyncErrors(async () => {
+          return await resolver.getCandidates(descriptor, resolvedDependencies, resolveOptions);
+        }, message => {
+          return `${structUtils.prettyDescriptor(this.configuration, descriptor)}: ${message}`;
+        });
+
+        const finalResolution = candidateResolutions[0];
+        if (typeof finalResolution === `undefined`)
+          throw new Error(`${structUtils.prettyDescriptor(this.configuration, descriptor)}: No candidates found`);
+
+        allDescriptors.set(descriptor.descriptorHash, descriptor);
+        allResolutions.set(descriptor.descriptorHash, finalResolution.locatorHash);
+
+        return schedulePackageResolution(finalResolution);
+      };
+
+      const scheduleDescriptorResolution = (descriptor: Descriptor) => {
+        const promise = descriptorResolutionPromises.get(descriptor.descriptorHash);
+        if (typeof promise !== `undefined`)
+          return promise;
+
+        allDescriptors.set(descriptor.descriptorHash, descriptor);
+
+        const newPromise = Promise.resolve().then(() => startDescriptorResolution(descriptor));
+        descriptorResolutionPromises.set(descriptor.descriptorHash, newPromise);
+        return newPromise;
+      };
+
+      for (const workspace of this.workspaces) {
+        const workspaceDescriptor = workspace.anchoredDescriptor;
+        resolutionQueue.push(scheduleDescriptorResolution(workspaceDescriptor));
       }
 
-      resolutionQueue.push(Promise.all([...pkg.dependencies.values()].map(descriptor => {
-        return scheduleDescriptorResolution(descriptor);
-      })));
-
-      allPackages.set(pkg.locatorHash, pkg);
-
-      return pkg;
-    };
-
-    const schedulePackageResolution = async (locator: Locator) => {
-      const promise = packageResolutionPromises.get(locator.locatorHash);
-      if (typeof promise !== `undefined`)
-        return promise;
-
-      const newPromise = Promise.resolve().then(() => startPackageResolution(locator));
-      packageResolutionPromises.set(locator.locatorHash, newPromise);
-      return newPromise;
-    };
-
-    const startDescriptorAliasing = async (descriptor: Descriptor, alias: Descriptor): Promise<Package> => {
-      const resolution = await scheduleDescriptorResolution(alias);
-
-      allDescriptors.set(descriptor.descriptorHash, descriptor);
-      allResolutions.set(descriptor.descriptorHash, resolution.locatorHash);
-
-      return resolution;
-    };
-
-    const startDescriptorResolution = async (descriptor: Descriptor): Promise<Package> => {
-      const alias = this.resolutionAliases.get(descriptor.descriptorHash);
-      if (typeof alias !== `undefined`)
-        return startDescriptorAliasing(descriptor, this.storedDescriptors.get(alias)!);
-
-      const resolutionDependencies = resolver.getResolutionDependencies(descriptor, resolveOptions);
-      const resolvedDependencies = new Map(await Promise.all(resolutionDependencies.map(async dependency => {
-        const bound = resolver.bindDescriptor(dependency, dependencyResolutionLocator, resolveOptions);
-
-        const resolvedPackage = await scheduleDescriptorResolution(bound);
-        allResolutionDependencyPackages.add(resolvedPackage.locatorHash);
-
-        return [dependency.descriptorHash, resolvedPackage] as const;
-      })));
-
-      const candidateResolutions = await miscUtils.prettifyAsyncErrors(async () => {
-        return await resolver.getCandidates(descriptor, resolvedDependencies, resolveOptions);
-      }, message => {
-        return `${structUtils.prettyDescriptor(this.configuration, descriptor)}: ${message}`;
-      });
-
-      const finalResolution = candidateResolutions[0];
-      if (typeof finalResolution === `undefined`)
-        throw new Error(`${structUtils.prettyDescriptor(this.configuration, descriptor)}: No candidates found`);
-
-      allDescriptors.set(descriptor.descriptorHash, descriptor);
-      allResolutions.set(descriptor.descriptorHash, finalResolution.locatorHash);
-
-      return schedulePackageResolution(finalResolution);
-    };
-
-    const scheduleDescriptorResolution = (descriptor: Descriptor) => {
-      const promise = descriptorResolutionPromises.get(descriptor.descriptorHash);
-      if (typeof promise !== `undefined`)
-        return promise;
-
-      allDescriptors.set(descriptor.descriptorHash, descriptor);
-
-      const newPromise = Promise.resolve().then(() => startDescriptorResolution(descriptor));
-      descriptorResolutionPromises.set(descriptor.descriptorHash, newPromise);
-      return newPromise;
-    };
-
-    for (const workspace of this.workspaces) {
-      const workspaceDescriptor = workspace.anchoredDescriptor;
-      resolutionQueue.push(scheduleDescriptorResolution(workspaceDescriptor));
-    }
-
-    while (resolutionQueue.length > 0) {
-      const copy = [...resolutionQueue];
-      resolutionQueue.length = 0;
-      await Promise.all(copy);
-    }
+      while (resolutionQueue.length > 0) {
+        const copy = [...resolutionQueue];
+        resolutionQueue.length = 0;
+        await miscUtils.allSettledSafe(copy);
+      }
+    });
 
     // In this step we now create virtual packages for each package with at
     // least one peer dependency. We also use it to search for the alias
@@ -833,7 +866,7 @@ export class Project {
       allPackages,
     });
 
-    for (const locatorHash of allResolutionDependencyPackages)
+    for (const locatorHash of resolutionDependencies)
       optionalBuilds.delete(locatorHash);
 
     // All descriptors still referenced within the volatileDescriptors set are
@@ -843,8 +876,6 @@ export class Project {
       allDescriptors.delete(descriptorHash);
       allResolutions.delete(descriptorHash);
     }
-
-    const supportedArchitectures = this.configuration.getSupportedArchitectures();
 
     const conditionalLocators = new Set<LocatorHash>();
     const disabledLocators = new Set<LocatorHash>();
@@ -857,7 +888,7 @@ export class Project {
         continue;
 
       if (!structUtils.isPackageCompatible(pkg, supportedArchitectures)) {
-        if (structUtils.isPackageCompatible(pkg, {os: [process.platform], cpu: [process.arch]})) {
+        if (structUtils.isPackageCompatible(pkg, currentArchitecture)) {
           opts.report.reportWarningOnce(MessageName.GHOST_ARCHITECTURE, `${
             structUtils.prettyLocator(this.configuration, pkg)
           }: Your current architecture (${
@@ -932,7 +963,7 @@ export class Project {
     const limit = pLimit(FETCHER_CONCURRENCY);
 
     await report.startCacheReport(async () => {
-      await Promise.all(locatorHashes.map(locatorHash => limit(async () => {
+      await miscUtils.allSettledSafe(locatorHashes.map(locatorHash => limit(async () => {
         const pkg = this.storedPackages.get(locatorHash);
         if (!pkg)
           throw new Error(`Assertion failed: The locator should have been registered`);
@@ -996,7 +1027,7 @@ export class Project {
     const packageLocations: Map<LocatorHash, PortablePath | null> = new Map();
     const packageBuildDirectives: Map<LocatorHash, { directives: Array<BuildDirective>, buildLocations: Array<PortablePath> }> = new Map();
 
-    const fetchResultsPerPackage = new Map(await Promise.all([...this.accessibleLocators].map(async locatorHash => {
+    const fetchResultsPerPackage = new Map(await miscUtils.allSettledSafe([...this.accessibleLocators].map(async locatorHash => {
       const pkg = this.storedPackages.get(locatorHash);
       if (!pkg)
         throw new Error(`Assertion failed: The locator should have been registered`);
@@ -1044,7 +1075,7 @@ export class Project {
           if (holdPromises.length === 0) {
             fetchResult.releaseFs?.();
           } else {
-            pendingPromises.push(Promise.all(holdPromises).catch(() => {}).then(() => {
+            pendingPromises.push(miscUtils.allSettledSafe(holdPromises).catch(() => {}).then(() => {
               fetchResult.releaseFs?.();
             }));
           }
@@ -1076,7 +1107,7 @@ export class Project {
           if (holdPromises.length === 0) {
             fetchResult.releaseFs?.();
           } else {
-            pendingPromises.push(Promise.all(holdPromises).then(() => {}).then(() => {
+            pendingPromises.push(miscUtils.allSettledSafe(holdPromises).then(() => {}).then(() => {
               fetchResult.releaseFs?.();
             }));
           }
@@ -1201,7 +1232,7 @@ export class Project {
 
     this.installersCustomData = installersCustomData;
 
-    await Promise.all(pendingPromises);
+    await miscUtils.allSettledSafe(pendingPromises);
 
     // Step 4: Build the packages in multiple steps
 
@@ -1410,7 +1441,7 @@ export class Project {
         }
       }
 
-      await Promise.all(buildPromises);
+      await miscUtils.allSettledSafe(buildPromises);
 
       // If we reach this code, it means that we have circular dependencies
       // somewhere. Worst, it means that the circular dependencies both have
@@ -1724,15 +1755,19 @@ export class Project {
 
   async restoreInstallState({restoreInstallersCustomData = true, restoreResolutions = true, restoreBuildState = true}: RestoreInstallStateOpts = {}) {
     const installStatePath = this.configuration.get(`installStatePath`);
-    if (!xfs.existsSync(installStatePath)) {
+
+    let installState: InstallState;
+    try {
+      const installStateBuffer = await gunzip(await xfs.readFilePromise(installStatePath)) as Buffer;
+      installState = v8.deserialize(installStateBuffer);
+      this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
+    } catch {
+      // If for whatever reason the install state can't be restored
+      // carry on as if it doesn't exist.
       if (restoreResolutions)
         await this.applyLightResolution();
       return;
     }
-
-    const installStateBuffer = await gunzip(await xfs.readFilePromise(installStatePath)) as Buffer;
-    this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
-    const installState: InstallState = v8.deserialize(installStateBuffer);
 
     if (restoreInstallersCustomData)
       if (typeof installState.installersCustomData !== `undefined`)
@@ -1771,6 +1806,9 @@ export class Project {
   }
 
   async cacheCleanup({cache, report}: InstallOptions)  {
+    if (this.configuration.get(`enableGlobalCache`))
+      return;
+
     const PRESERVED_FILES = new Set([
       `.gitignore`,
     ]);
@@ -1840,27 +1878,27 @@ function applyVirtualResolutionMutations({
 
   accessibleLocators = new Set(),
   optionalBuilds = new Set(),
-  volatileDescriptors = new Set(),
   peerRequirements = new Map(),
+  volatileDescriptors = new Set(),
 
   report,
 
   tolerateMissingPackages = false,
 }: {
-  project: Project,
+  project: Project;
 
-  allDescriptors: Map<DescriptorHash, Descriptor>,
-  allResolutions: Map<DescriptorHash, LocatorHash>,
-  allPackages: Map<LocatorHash, Package>,
+  allDescriptors: Map<DescriptorHash, Descriptor>;
+  allResolutions: Map<DescriptorHash, LocatorHash>;
+  allPackages: Map<LocatorHash, Package>;
 
-  accessibleLocators?: Set<LocatorHash>,
-  optionalBuilds?: Set<LocatorHash>,
-  volatileDescriptors?: Set<DescriptorHash>,
-  peerRequirements?: Project['peerRequirements'],
+  accessibleLocators?: Set<LocatorHash>;
+  optionalBuilds?: Set<LocatorHash>;
+  peerRequirements?: Project['peerRequirements'];
+  volatileDescriptors?: Set<DescriptorHash>;
 
-  report: Report | null,
+  report: Report | null;
 
-  tolerateMissingPackages?: boolean,
+  tolerateMissingPackages?: boolean;
 }) {
   const virtualStack = new Map<LocatorHash, number>();
   const resolutionStack: Array<Locator> = [];
@@ -2017,14 +2055,6 @@ function applyVirtualResolutionMutations({
         continue;
       }
 
-      // The stack overflow is checked against two level because a workspace
-      // may have a dev dependency on another workspace that lists the first
-      // one as a regular dependency. In this case the loop will break so we
-      // don't need to throw an exception.
-      const stackDepth = virtualStack.get(pkg.locatorHash);
-      if (typeof stackDepth === `number` && stackDepth >= 2)
-        reportStackOverflow();
-
       let virtualizedDescriptor: Descriptor;
       let virtualizedPackage: Package;
 
@@ -2054,8 +2084,19 @@ function applyVirtualResolutionMutations({
         for (const peerRequest of virtualizedPackage.peerDependencies.values()) {
           let peerDescriptor = parentPackage.dependencies.get(peerRequest.identHash);
 
-          if (!peerDescriptor && structUtils.areIdentsEqual(parentLocator, peerRequest))
-            peerDescriptor = parentDescriptor;
+          if (!peerDescriptor && structUtils.areIdentsEqual(parentLocator, peerRequest)) {
+            // If the parent isn't installed under an alias we can skip unnecessary steps
+            if (parentDescriptor.identHash === parentLocator.identHash) {
+              peerDescriptor = parentDescriptor;
+            } else {
+              peerDescriptor = structUtils.makeDescriptor(parentLocator, parentDescriptor.range);
+
+              allDescriptors.set(peerDescriptor.descriptorHash, peerDescriptor);
+              allResolutions.set(peerDescriptor.descriptorHash, parentLocator.locatorHash);
+
+              volatileDescriptors.delete(peerDescriptor.descriptorHash);
+            }
+          }
 
           // If the peerRequest isn't provided by the parent then fall back to dependencies
           if ((!peerDescriptor || peerDescriptor.range === `missing:`) && virtualizedPackage.dependencies.has(peerRequest.identHash)) {
@@ -2091,6 +2132,15 @@ function applyVirtualResolutionMutations({
       thirdPass.push(() => {
         if (!allPackages.has(virtualizedPackage.locatorHash))
           return;
+
+        // The stack overflow is checked against two level because a workspace
+        // may have a dev dependency on another workspace that lists the first
+        // one as a regular dependency. In this case the loop will break so we
+        // don't need to throw an exception.
+        const stackDepth = virtualStack.get(pkg.locatorHash);
+
+        if (typeof stackDepth === `number` && stackDepth >= 2)
+          reportStackOverflow();
 
         const current = virtualStack.get(pkg.locatorHash);
         const next = typeof current !== `undefined` ? current + 1 : 1;
@@ -2140,9 +2190,6 @@ function applyVirtualResolutionMutations({
       stable = true;
 
       for (const [physicalLocator, virtualDescriptor, virtualPackage] of newVirtualInstances) {
-        if (!allPackages.has(virtualPackage.locatorHash))
-          continue;
-
         const otherVirtualInstances = miscUtils.getMapWithDefault(allVirtualInstances, physicalLocator.locatorHash);
 
         // We take all the dependencies from the new virtual instance and
@@ -2179,8 +2226,6 @@ function applyVirtualResolutionMutations({
         if (masterDescriptor === virtualDescriptor)
           continue;
 
-        stable = false;
-
         allPackages.delete(virtualPackage.locatorHash);
         allDescriptors.delete(virtualDescriptor.descriptorHash);
         allResolutions.delete(virtualDescriptor.descriptorHash);
@@ -2196,6 +2241,9 @@ function applyVirtualResolutionMutations({
           const pkg = allPackages.get(dependent);
           if (typeof pkg === `undefined`)
             continue;
+
+          if (pkg.dependencies.get(virtualDescriptor.identHash)!.descriptorHash !== masterDescriptor.descriptorHash)
+            stable = false;
 
           pkg.dependencies.set(virtualDescriptor.identHash, masterDescriptor);
         }
@@ -2220,19 +2268,19 @@ function applyVirtualResolutionMutations({
   }
 
   type Warning = {
-    type: WarningType.NotProvided,
-    subject: Locator,
-    requested: Ident,
-    requester: Ident,
-    hash: string,
+    type: WarningType.NotProvided;
+    subject: Locator;
+    requested: Ident;
+    requester: Ident;
+    hash: string;
   } | {
-    type: WarningType.NotCompatible,
-    subject: Locator,
-    requested: Ident,
-    requester: Ident,
-    version: string,
-    hash: string,
-    requirementCount: number,
+    type: WarningType.NotCompatible;
+    subject: Locator;
+    requested: Ident;
+    requester: Ident;
+    version: string;
+    hash: string;
+    requirementCount: number;
   };
 
   const warnings: Array<Warning> = [];
@@ -2347,41 +2395,44 @@ function applyVirtualResolutionMutations({
     warning => `${warning.type}`,
   ];
 
-  for (const warning of miscUtils.sortMap(warnings, warningSortCriterias)) {
-    switch (warning.type) {
-      case WarningType.NotProvided: {
-        report?.reportWarning(MessageName.MISSING_PEER_DEPENDENCY, `${
-          structUtils.prettyLocator(project.configuration, warning.subject)
-        } doesn't provide ${
-          structUtils.prettyIdent(project.configuration, warning.requested)
-        } (${
-          formatUtils.pretty(project.configuration, warning.hash, formatUtils.Type.CODE)
-        }), requested by ${
-          structUtils.prettyIdent(project.configuration, warning.requester)
-        }`);
-      } break;
+  report?.startSectionSync({
+    reportFooter: () => {
+      report.reportWarning(MessageName.UNNAMED, `Some peer dependencies are incorrectly met; run ${formatUtils.pretty(project.configuration, `yarn explain peer-requirements <hash>`, formatUtils.Type.CODE)} for details, where ${formatUtils.pretty(project.configuration, `<hash>`, formatUtils.Type.CODE)} is the six-letter p-prefixed code`);
+    },
+    skipIfEmpty: true,
+  }, () => {
+    for (const warning of miscUtils.sortMap(warnings, warningSortCriterias)) {
+      switch (warning.type) {
+        case WarningType.NotProvided: {
+          report.reportWarning(MessageName.MISSING_PEER_DEPENDENCY, `${
+            structUtils.prettyLocator(project.configuration, warning.subject)
+          } doesn't provide ${
+            structUtils.prettyIdent(project.configuration, warning.requested)
+          } (${
+            formatUtils.pretty(project.configuration, warning.hash, formatUtils.Type.CODE)
+          }), requested by ${
+            structUtils.prettyIdent(project.configuration, warning.requester)
+          }`);
+        } break;
 
-      case WarningType.NotCompatible: {
-        const andDescendants = warning.requirementCount > 1
-          ? `and some of its descendants request`
-          : `requests`;
+        case WarningType.NotCompatible: {
+          const andDescendants = warning.requirementCount > 1
+            ? `and some of its descendants request`
+            : `requests`;
 
-        report?.reportWarning(MessageName.INCOMPATIBLE_PEER_DEPENDENCY, `${
-          structUtils.prettyLocator(project.configuration, warning.subject)
-        } provides ${
-          structUtils.prettyIdent(project.configuration, warning.requested)
-        } (${
-          formatUtils.pretty(project.configuration, warning.hash, formatUtils.Type.CODE)
-        }) with version ${
-          structUtils.prettyReference(project.configuration, warning.version)
-        }, which doesn't satisfy what ${
-          structUtils.prettyIdent(project.configuration, warning.requester)
-        } ${andDescendants}`);
-      } break;
+          report.reportWarning(MessageName.INCOMPATIBLE_PEER_DEPENDENCY, `${
+            structUtils.prettyLocator(project.configuration, warning.subject)
+          } provides ${
+            structUtils.prettyIdent(project.configuration, warning.requested)
+          } (${
+            formatUtils.pretty(project.configuration, warning.hash, formatUtils.Type.CODE)
+          }) with version ${
+            structUtils.prettyReference(project.configuration, warning.version)
+          }, which doesn't satisfy what ${
+            structUtils.prettyIdent(project.configuration, warning.requester)
+          } ${andDescendants}`);
+        } break;
+      }
     }
-  }
-
-  if (warnings.length > 0) {
-    report?.reportWarning(MessageName.UNNAMED, `Some peer dependencies are incorrectly met; run ${formatUtils.pretty(project.configuration, `yarn explain peer-requirements <hash>`, formatUtils.Type.CODE)} for details, where ${formatUtils.pretty(project.configuration, `<hash>`, formatUtils.Type.CODE)} is the six-letter p-prefixed code`);
-  }
+  });
 }
