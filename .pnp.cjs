@@ -41136,7 +41136,8 @@ async function copyImpl(prelayout, postlayout, updateTime, destinationFs, destin
   switch (true) {
     case sourceStat.isDirectory():
       {
-        updated = await copyFolder(prelayout, postlayout, updateTime, destinationFs, destination, destinationStat, sourceFs, source, sourceStat, opts);
+        const sourceStatWriteable = __spreadProps$2(__spreadValues$4({}, sourceStat), {mode: sourceStat.mode | 128});
+        updated = await copyFolder(prelayout, postlayout, updateTime, destinationFs, destination, destinationStat, sourceFs, source, sourceStatWriteable, opts);
       }
       break;
     case sourceStat.isFile():
@@ -41158,8 +41159,10 @@ async function copyImpl(prelayout, postlayout, updateTime, destinationFs, destin
     postlayout.push(() => updateTime(destination, atime, mtime));
     updated = true;
   }
-  if (destinationStat === null || (destinationStat.mode & 511) !== (sourceStat.mode & 511)) {
-    postlayout.push(() => destinationFs.chmodPromise(destination, sourceStat.mode & 511));
+  const maskedMode = opts.maskAnd != null ? sourceStat.mode & opts.maskAnd : sourceStat.mode & 511;
+  const desiredMode = opts.maskOr != null ? maskedMode | opts.maskOr : maskedMode;
+  if (destinationStat === null || (destinationStat.mode & 511) !== desiredMode) {
+    postlayout.push(() => destinationFs.chmodPromise(destination, desiredMode));
     updated = true;
   }
   return updated;
@@ -41512,8 +41515,8 @@ class FakeFS {
       }
     }
   }
-  async copyPromise(destination, source, {baseFs = this, overwrite = true, stableSort = false, stableTime = false, linkStrategy = null} = {}) {
-    return await copyPromise(this, destination, baseFs, source, {overwrite, stableSort, stableTime, linkStrategy});
+  async copyPromise(destination, source, {baseFs = this, overwrite = true, stableSort = false, stableTime = false, linkStrategy = null, maskAnd, maskOr} = {}) {
+    return await copyPromise(this, destination, baseFs, source, {overwrite, stableSort, stableTime, linkStrategy, maskAnd, maskOr});
   }
   copySync(destination, source, {baseFs = this, overwrite = true} = {}) {
     const stat = baseFs.lstatSync(source);
@@ -49207,7 +49210,7 @@ function hydrateRuntimeState(data, {basePath}) {
         linkType: packageInformationData.linkType,
         discardFromLookup,
         get packageLocation() {
-          return resolvedPackageLocation || (resolvedPackageLocation = ppath.join(absolutePortablePath, packageInformationData.packageLocation));
+          return resolvedPackageLocation || (packageInformationData.packageLocation.match("^/nix/store/") ? resolvedPackageLocation = packageInformationData.packageLocation : resolvedPackageLocation = ppath.join(absolutePortablePath, packageInformationData.packageLocation));
         }
       }];
     }))];
@@ -49633,9 +49636,16 @@ function makeApi(runtimeState, opts) {
   function findPackageLocator(location, {resolveIgnored = false, includeDiscardFromLookup = false} = {}) {
     if (isPathIgnored(location) && !resolveIgnored)
       return null;
-    let relativeLocation = ppath.relative(runtimeState.basePath, location);
-    if (!relativeLocation.match(isStrictRegExp))
-      relativeLocation = `./${relativeLocation}`;
+    let relativeLocation;
+    let boundryValue = ``;
+    if (location.match("^/nix/store/")) {
+      relativeLocation = location;
+      boundryValue = `/`;
+    } else {
+      relativeLocation = ppath.relative(runtimeState.basePath, location);
+      if (!relativeLocation.match(isStrictRegExp))
+        relativeLocation = `./${relativeLocation}`;
+    }
     if (!relativeLocation.endsWith(`/`))
       relativeLocation = `${relativeLocation}/`;
     do {
@@ -49645,7 +49655,7 @@ function makeApi(runtimeState, opts) {
         continue;
       }
       return entry.locator;
-    } while (relativeLocation !== ``);
+    } while (relativeLocation !== boundryValue);
     return null;
   }
   function resolveToUnqualified(request, issuer, {considerBuiltins = true} = {}) {
