@@ -21,7 +21,6 @@ const SYNC_IMPLEMENTATIONS = new Set([
   `mkdirSync`,
   `openSync`,
   `opendirSync`,
-  `readSync`,
   `readlinkSync`,
   `readFileSync`,
   `readdirSync`,
@@ -85,6 +84,64 @@ const FILEHANDLE_IMPLEMENTATIONS = new Set([
   `writeFilePromise`,
 ]);
 
+//#region readSync types
+interface ReadSyncOptions {
+  /**
+   * @default 0
+   */
+  offset?: number | undefined;
+  /**
+   * @default `length of buffer`
+   */
+  length?: number | undefined;
+  /**
+   * @default null
+   */
+  position?: number | null | undefined;
+}
+
+type ReadSyncArguments = [
+  fd: number,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position?: number | null,
+];
+
+type ReadSyncArgumentsOptions = [
+  fd: number,
+  buffer: Buffer,
+  opts?: ReadSyncOptions,
+];
+//#endregion
+
+//#region read types
+type ReadOptions = ReadSyncOptions & { buffer?: Buffer };
+
+type ReadCallback = (
+  err: NodeJS.ErrnoException | null,
+  bytesRead: number,
+  buffer: Buffer
+) => void;
+
+type ReadArguments = [
+  fd: number,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number | null | undefined,
+  callback: ReadCallback,
+];
+
+type ReadArgumentsOptions = [
+  fd: number,
+  opts: ReadOptions,
+  callback: ReadCallback,
+];
+
+type ReadArgumentsCallback = [fd: number, callback: ReadCallback];
+//#endregion
+
 export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void {
   // We wrap the `fakeFs` with a `URLFS` to add support for URL instances
   fakeFs = new URLFS(fakeFs);
@@ -114,12 +171,47 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
       });
     });
 
-    setupFn(patchedFs, `read`, (p: number, buffer: Buffer, ...args: Array<any>) => {
-      const hasCallback = typeof args[args.length - 1] === `function`;
-      const callback = hasCallback ? args.pop() : () => {};
+    // Adapted from https://github.com/nodejs/node/blob/e5c1fd7a2a1801fd75bdde23b260488e85453eb2/lib/fs.js#L603-L667
+    setupFn(patchedFs, `read`, (...args: ReadArguments | ReadArgumentsOptions | ReadArgumentsCallback) => {
+      let [fd, buffer, offset, length, position, callback] = args as ReadArguments;
+
+      if (args.length <= 3) {
+        // Assume fs.read(fd, options, callback)
+        let options: ReadOptions = {};
+        if (args.length < 3) {
+          // This is fs.read(fd, callback)
+          callback = (args as ReadArgumentsCallback)[1];
+        } else {
+          // This is fs.read(fd, {}, callback)
+          options = (args as ReadArgumentsOptions)[1];
+          callback = (args as ReadArgumentsOptions)[2];
+        }
+
+        ({
+          buffer = Buffer.alloc(16384),
+          offset = 0,
+          length = buffer.byteLength,
+          position,
+        } = options);
+      }
+
+      if (offset == null)
+        offset = 0;
+
+      length |= 0;
+
+      if (length === 0) {
+        process.nextTick(() => {
+          callback(null, 0, buffer);
+        });
+        return;
+      }
+
+      if (position == null)
+        position = -1;
 
       process.nextTick(() => {
-        fakeFs.readPromise(p, buffer, ...args).then(bytesRead => {
+        fakeFs.readPromise(fd, buffer, offset, length, position).then(bytesRead => {
           callback(null, bytesRead, buffer);
         }, error => {
           // https://github.com/nodejs/node/blob/1317252dfe8824fd9cfee125d2aaa94004db2f3b/lib/fs.js#L655-L658
@@ -165,6 +257,31 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
       } catch (error) {
         return false;
       }
+    });
+
+    // Adapted from https://github.com/nodejs/node/blob/e5c1fd7a2a1801fd75bdde23b260488e85453eb2/lib/fs.js#L684-L725
+    setupFn(patchedFs, `readSync`, (...args: ReadSyncArguments | ReadSyncArgumentsOptions) => {
+      let [fd, buffer, offset, length, position] = args as ReadSyncArguments;
+
+      if (args.length <= 3) {
+        // Assume fs.read(fd, buffer, options)
+        const options = (args as ReadSyncArgumentsOptions)[2] || {};
+
+        ({offset = 0, length = buffer.byteLength, position} = options);
+      }
+
+      if (offset == null)
+        offset = 0;
+
+      length |= 0;
+
+      if (length === 0)
+        return 0;
+
+      if (position == null)
+        position = -1;
+
+      return fakeFs.readSync(fd, buffer, offset, length, position);
     });
 
     for (const fnName of SYNC_IMPLEMENTATIONS) {
@@ -246,14 +363,22 @@ export function patchFs(patchedFs: typeof fs, fakeFs: FakeFS<NativePath>): void 
 
   /** util.promisify implementations */
   {
-    // Override the promisified version of `fs.read` to return an object as per
+    // TODO add promisified `fs.readv` and `fs.writev`, once they are implemented
+    // Override the promisified versions of `fs.read` and `fs.write` to return an object as per
     // https://github.com/nodejs/node/blob/dc79f3f37caf6f25b8efee4623bec31e2c20f595/lib/fs.js#L559-L560
+    // and
+    // https://github.com/nodejs/node/blob/dc79f3f37caf6f25b8efee4623bec31e2c20f595/lib/fs.js#L690-L691
     // and
     // https://github.com/nodejs/node/blob/ba684805b6c0eded76e5cd89ee00328ac7a59365/lib/internal/util.js#L293
     // @ts-expect-error
-    patchedFs.read[promisify.custom] = async (p: number, buffer: Buffer, ...args: Array<any>) => {
-      const res = fakeFs.readPromise(p, buffer, ...args);
+    patchedFs.read[promisify.custom] = async (fd: number, buffer: Buffer, ...args: Array<any>) => {
+      const res = fakeFs.readPromise(fd, buffer, ...args);
       return {bytesRead: await res, buffer};
+    };
+    // @ts-expect-error
+    patchedFs.write[promisify.custom] = async (fd: number, buffer: Buffer, ...args: Array<any>) => {
+      const res = fakeFs.writePromise(fd, buffer, ...args);
+      return {bytesWritten: await res, buffer};
     };
   }
 }

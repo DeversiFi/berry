@@ -79,30 +79,31 @@ export enum SettingsType {
 export type SupportedArchitectures = {
   os: Array<string> | null;
   cpu: Array<string> | null;
+  libc: Array<string> | null;
 };
 
 export type FormatType = formatUtils.Type;
 export const FormatType = formatUtils.Type;
 
 export type BaseSettingsDefinition<T extends SettingsType = SettingsType> = {
-  description: string,
-  type: T,
+  description: string;
+  type: T;
 } & ({isArray?: false} | {isArray: true, concatenateValues?: boolean});
 
 export type ShapeSettingsDefinition = BaseSettingsDefinition<SettingsType.SHAPE> & {
-  properties: {[propertyName: string]: SettingsDefinition},
+  properties: {[propertyName: string]: SettingsDefinition};
 };
 
 export type MapSettingsDefinition = BaseSettingsDefinition<SettingsType.MAP> & {
-  valueDefinition: SettingsDefinitionNoDefault,
-  normalizeKeys?: (key: string) => string,
+  valueDefinition: SettingsDefinitionNoDefault;
+  normalizeKeys?: (key: string) => string;
 };
 
 export type SimpleSettingsDefinition = BaseSettingsDefinition<Exclude<SettingsType, SettingsType.SHAPE | SettingsType.MAP>> & {
-  default: any,
-  defaultText?: any,
-  isNullable?: boolean,
-  values?: Array<any>,
+  default: any;
+  defaultText?: any;
+  isNullable?: boolean;
+  values?: Array<any>;
 };
 
 export type SettingsDefinitionNoDefault =
@@ -116,8 +117,8 @@ export type SettingsDefinition =
   | SimpleSettingsDefinition;
 
 export type PluginConfiguration = {
-  modules: Map<string, any>,
-  plugins: Set<string>,
+  modules: Map<string, any>;
+  plugins: Set<string>;
 };
 
 // General rules:
@@ -169,7 +170,7 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     default: null,
   },
   globalFolder: {
-    description: `Folder where are stored the system-wide settings`,
+    description: `Folder where all system-global files are stored`,
     type: SettingsType.ABSOLUTE_PATH,
     default: folderUtils.getDefaultGlobalFolder(),
   },
@@ -243,7 +244,7 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
   enableProgressBars: {
     description: `If true, the CLI is allowed to show a progress bar for long-running events`,
     type: SettingsType.BOOLEAN,
-    default: !isCI && process.stdout.isTTY && process.stdout.columns > 22,
+    default: !isCI,
     defaultText: `<dynamic>`,
   },
   enableTimers: {
@@ -302,6 +303,13 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
       },
       cpu: {
         description: `Array of supported process.arch strings, or null to target them all`,
+        type: SettingsType.STRING,
+        isArray: true,
+        isNullable: true,
+        default: [`current`],
+      },
+      libc: {
+        description: `Array of supported libc libraries, or null to target them all`,
         type: SettingsType.STRING,
         isArray: true,
         isNullable: true,
@@ -379,11 +387,31 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
           type: SettingsType.STRING,
           default: null,
         },
+        httpsKeyFilePath: {
+          description: `Path to file containing private key in PEM format`,
+          type: SettingsType.ABSOLUTE_PATH,
+          default: null,
+        },
+        httpsCertFilePath: {
+          description: `Path to file containing certificate chain in PEM format`,
+          type: SettingsType.ABSOLUTE_PATH,
+          default: null,
+        },
       },
     },
   },
   caFilePath: {
     description: `A path to a file containing one or multiple Certificate Authority signing certificates`,
+    type: SettingsType.ABSOLUTE_PATH,
+    default: null,
+  },
+  httpsKeyFilePath: {
+    description: `Path to file containing private key in PEM format`,
+    type: SettingsType.ABSOLUTE_PATH,
+    default: null,
+  },
+  httpsCertFilePath: {
+    description: `Path to file containing certificate chain in PEM format`,
     type: SettingsType.ABSOLUTE_PATH,
     default: null,
   },
@@ -558,8 +586,12 @@ export interface ConfigurationValueMap {
     enableNetwork: boolean | null;
     httpProxy: string | null;
     httpsProxy: string | null;
+    httpsKeyFilePath: PortablePath | null;
+    httpsCertFilePath: PortablePath | null;
   }>>;
   caFilePath: PortablePath | null;
+  httpsKeyFilePath: PortablePath | null;
+  httpsCertFilePath: PortablePath | null;
   enableStrictSsl: boolean;
 
   logFilters: Array<miscUtils.ToMapValue<{code?: string, text?: string, pattern?: string, level?: formatUtils.LogLevel | null}>>;
@@ -577,9 +609,9 @@ export interface ConfigurationValueMap {
 
   // Package patching - to fix incorrect definitions
   packageExtensions: Map<string, miscUtils.ToMapValue<{
-    dependencies?: Map<string, string>,
-    peerDependencies?: Map<string, string>,
-    peerDependenciesMeta?: Map<string, miscUtils.ToMapValue<{optional?: boolean}>>,
+    dependencies?: Map<string, string>;
+    peerDependencies?: Map<string, string>;
+    peerDependenciesMeta?: Map<string, miscUtils.ToMapValue<{optional?: boolean}>>;
   }>>;
 }
 
@@ -858,10 +890,10 @@ export enum ProjectLookup {
 }
 
 export type FindProjectOptions = {
-  lookup?: ProjectLookup,
-  strict?: boolean,
-  usePath?: boolean,
-  useRc?: boolean,
+  lookup?: ProjectLookup;
+  strict?: boolean;
+  usePath?: boolean;
+  useRc?: boolean;
 };
 
 export class Configuration {
@@ -1111,7 +1143,7 @@ export class Configuration {
       path: PortablePath;
       cwd: PortablePath;
       data: any;
-      strict?: boolean
+      strict?: boolean;
     }> = [];
 
     let nextCwd = startingCwd;
@@ -1445,18 +1477,23 @@ export class Configuration {
     return linkers;
   }
 
-  getSupportedArchitectures() {
+  getSupportedArchitectures(): nodeUtils.ArchitectureSet {
+    const architecture = nodeUtils.getArchitecture();
     const supportedArchitectures = this.get(`supportedArchitectures`);
 
     let os = supportedArchitectures.get(`os`);
     if (os !== null)
-      os = os.map(value => value === `current` ? process.platform : value);
+      os = os.map(value => value === `current` ? architecture.os : value);
 
     let cpu = supportedArchitectures.get(`cpu`);
     if (cpu !== null)
-      cpu = cpu.map(value => value === `current` ? process.arch : value);
+      cpu = cpu.map(value => value === `current` ? architecture.cpu : value);
 
-    return {os, cpu};
+    let libc = supportedArchitectures.get(`libc`);
+    if (libc !== null)
+      libc = miscUtils.mapAndFilter(libc, value => value === `current` ? architecture.libc ?? miscUtils.mapAndFilter.skip : value);
+
+    return {os, cpu, libc};
   }
 
   async refreshPackageExtensions() {

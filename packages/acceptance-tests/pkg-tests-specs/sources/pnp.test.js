@@ -360,22 +360,6 @@ describe(`Plug'n'Play`, () => {
   );
 
   test(
-    `it should not add the implicit self dependency if an explicit one already exists`,
-    makeTemporaryEnv(
-      {
-        dependencies: {[`self-require-trap`]: `1.0.0`},
-      },
-      async ({path, run, source}) => {
-        await run(`install`);
-
-        await expect(source(`require('self-require-trap/self') !== require('self-require-trap')`)).resolves.toEqual(
-          true,
-        );
-      },
-    ),
-  );
-
-  test(
     `it should run scripts using a Node version that auto-injects the hook`,
     makeTemporaryEnv(
       {
@@ -1652,7 +1636,7 @@ describe(`Plug'n'Play`, () => {
         const stdout = (await run(`install`)).stdout;
 
         expect(stdout).not.toContain(`Shall not be run`);
-        expect(stdout).toMatch(new RegExp(`dep@file:./dep.*The ${process.platform}-${process.arch} architecture is incompatible with this module, build skipped.`));
+        expect(stdout).toMatch(new RegExp(`dep@file:./dep.*The ${process.platform}-${process.arch}(-[a-z]+)? architecture is incompatible with this package, build skipped.`));
 
         await expect(source(`require('dep')`)).resolves.toMatchObject({
           name: `dep`,
@@ -2103,7 +2087,7 @@ describe(`Plug'n'Play`, () => {
             return originalStatSync(__filename);
           }
 
-          console.log(require('${path}/does/not/exist.js'))
+          console.log(require('${path}/does/not/exist.cjs'))
         `);
 
         await expect(run(`node`, `./index.js`)).resolves.toMatchObject({

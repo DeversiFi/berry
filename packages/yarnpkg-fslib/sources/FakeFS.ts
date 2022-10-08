@@ -9,14 +9,14 @@ import {FSPath, Path, PortablePath, PathUtils, Filename} from './path';
 import {convertPath, ppath}                              from './path';
 
 export type Stats = NodeStats & {
-  crc?: number
+  crc?: number;
 };
 export type BigIntStats = NodeBigIntStats & {
-  crc?: number
+  crc?: number;
 };
 
 export type Dirent = Exclude<NodeDirent, 'name'> & {
-  name: Filename,
+  name: Filename;
 };
 
 export type Dir<P extends Path> = {
@@ -40,48 +40,48 @@ export type OpendirOptions = Partial<{
 }>;
 
 export type CreateReadStreamOptions = Partial<{
-  encoding: string,
-  fd: number,
+  encoding: string;
+  fd: number;
 }>;
 
 export type CreateWriteStreamOptions = Partial<{
-  encoding: string,
-  fd: number,
-  flags: 'a',
+  encoding: string;
+  fd: number;
+  flags: 'a';
 }>;
 
 export type MkdirOptions = Partial<{
-  recursive: boolean,
-  mode: number,
+  recursive: boolean;
+  mode: number;
 }>;
 
 export type RmdirOptions = Partial<{
-  maxRetries: number,
-  recursive: boolean,
-  retryDelay: number,
+  maxRetries: number;
+  recursive: boolean;
+  retryDelay: number;
 }>;
 
 export type WriteFileOptions = Partial<{
-  encoding: string,
-  mode: number,
-  flag: string,
+  encoding: string;
+  mode: number;
+  flag: string;
 }> | string;
 
 export type WatchOptions = Partial<{
-  persistent: boolean,
-  recursive: boolean,
-  encoding: string,
+  persistent: boolean;
+  recursive: boolean;
+  encoding: string;
 }> | string;
 
 export type WatchFileOptions = Partial<{
-  bigint: boolean,
-  persistent: boolean,
-  interval: number,
+  bigint: boolean;
+  persistent: boolean;
+  interval: number;
 }>;
 
 export type ChangeFileOptions = Partial<{
-  automaticNewlines: boolean,
-  mode: number,
+  automaticNewlines: boolean;
+  mode: number;
 }>;
 
 export type WatchCallback = (
@@ -90,8 +90,8 @@ export type WatchCallback = (
 ) => void;
 
 export type Watcher = {
-  on: any,
-  close: () => void,
+  on: any;
+  close: () => void;
 };
 
 export type WatchFileCallback = (
@@ -101,8 +101,8 @@ export type WatchFileCallback = (
 
 export type StatWatcher = EventEmitter & {
   // Node 14+
-  ref?: () => StatWatcher,
-  unref?: () => StatWatcher,
+  ref?: () => StatWatcher;
+  unref?: () => StatWatcher;
 };
 
 export type ExtractHintOptions = {
@@ -290,24 +290,18 @@ export abstract class FakeFS<P extends Path> {
       }
 
       // 5 gives 1s worth of retries at worst
-      let t = 0;
-      do {
+      for (let t = 0; t <= maxRetries; t++) {
         try {
           await this.rmdirPromise(p);
           break;
         } catch (error) {
-          if (error.code === `EBUSY` || error.code === `ENOTEMPTY`) {
-            if (maxRetries === 0) {
-              break;
-            } else {
-              await new Promise(resolve => setTimeout(resolve, t * 100));
-              continue;
-            }
-          } else {
+          if (error.code !== `EBUSY` && error.code !== `ENOTEMPTY`) {
             throw error;
+          } else if (t < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, t * 100));
           }
         }
-      } while (t++ < maxRetries);
+      }
     } else {
       await this.unlinkPromise(p);
     }
@@ -405,7 +399,7 @@ export abstract class FakeFS<P extends Path> {
   }
 
   copyPromise(destination: P, source: P, options?: {baseFs?: undefined, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean, linkStrategy?: LinkStrategy, maskAnd?: number, maskOr?: number}): Promise<void>;
-  copyPromise<P2 extends Path>(destination: P, source: P2, options: {baseFs: FakeFS<P2>, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean, linkStrategy?: LinkStrategy, maskAnd?: number, maskAndOr?: number}): Promise<void>;
+  copyPromise<P2 extends Path>(destination: P, source: P2, options: {baseFs: FakeFS<P2>, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean, linkStrategy?: LinkStrategy, maskAnd?: number, maskOr?: number}): Promise<void>;
   async copyPromise<P2 extends Path>(destination: P, source: P2, {baseFs = this as any, overwrite = true, stableSort = false, stableTime = false, linkStrategy = null, maskAnd, maskOr}: {baseFs?: FakeFS<P2>, overwrite?: boolean, stableSort?: boolean, stableTime?: boolean, linkStrategy?: LinkStrategy | null, maskAnd?: number, maskOr?: number} = {}) {
     return await copyPromise(this, destination, baseFs, source, {overwrite, stableSort, stableTime, linkStrategy, maskAnd, maskOr});
   }
